@@ -1,0 +1,166 @@
+---
+title: "Men and Women in the Stack Overflow Developer Survey"
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    theme: lumen
+    orientation: columns
+    vertical_layout: fill
+    source_code: https://github.com/juliasilge/stacksurveyapp
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(stacksurveyr)
+library(stringr)
+library(broom)
+
+question_cols <- list("agree_tech",
+                      "agree_notice",
+                      "agree_problemsolving",
+                      "agree_diversity",
+                      "agree_adblocker",
+                      "agree_alcohol",
+                      "agree_loveboss",
+                      "agree_nightcode",
+                      "agree_legacy",
+                      "agree_mars",
+                      "important_variety",
+                      "important_control",
+                      "important_sameend",
+                      "important_newtech",
+                      "important_buildnew",
+                      "important_buildexisting",
+                      "important_promotion",
+                      "important_companymission",
+                      "important_wfh",
+                      "important_ownoffice")
+
+
+questions_single <- stack_schema %>%
+    filter(column %in% question_cols) %>%
+    mutate(new_description = if_else(str_detect(column, "^important"), 
+                                      str_c(description, " is important."), 
+                                      description) )
+
+make_joined_df <- function(col) {
+    
+    stack_survey <- stack_survey[!is.na(stack_survey[,which(colnames(stack_survey) == col)]),]
+
+    selected_df <- stack_survey %>% 
+        filter(gender %in% c("Male", "Female")) %>%
+        group_by_(quote(gender), col) %>% 
+        summarize(n = n()) %>%
+        ungroup
+
+    joined_df <- left_join(selected_df, 
+                           selected_df %>% 
+                               group_by(gender) %>% 
+                               summarize(sum = sum(n))) %>%
+        mutate(proportion = n / sum,
+               error = sqrt((proportion * (1-proportion))/n),
+               question = col) %>%
+        ungroup %>%
+        rename_("answer" = col)
+    
+    joined_df
+}
+
+survey_df <- question_cols %>% 
+    map_df(make_joined_df) %>%
+    left_join(questions_single %>%
+                  select(column, new_description),
+              by = c("question" = "column"))
+
+chisq_test <- survey_df %>% 
+    nest(-question, -new_description) %>% 
+    mutate(x = map(data, function(df) {df %>% 
+                   filter(gender == "Female") %>% 
+                   select(women = n) %>% 
+                   as.matrix}),
+           y = map(data, function(df) {df %>% 
+                   filter(gender == "Male") %>% 
+                   select(men = n) %>% 
+                   as.matrix}),
+           chisq = map2(x, y, ~ chisq.test(as.table(cbind(.x, .y)))))
+
+p_values <- chisq_test %>%
+    unnest(map(chisq, tidy)) %>%
+    mutate(adjusted.p.value = p.adjust(p.value))
+
+
+```
+
+Column {.sidebar}
+-----------------------------------------------------------------------
+
+The [Stack Overflow Developer Survey](http://stackoverflow.com/research/developer-survey-2016) provides a large data set for understanding who developers are and what makes them (us?) tick. Let's use responses to this survey to see if we can understand differences between men and women involved in software.
+
+Use the input below to choose a survey question to display; a statistical comparison of men and women on that survey will appear below the plot.
+
+```{r}
+selectInput("selected", label = "Statement on survey:",
+            choices = questions_single$new_description,
+            selected = "Diversity in the workplace is important.")
+```
+
+
+Column 
+-----------------------------------------------------------------------
+
+### Comparing Men and Women {data-height=800}
+
+```{r}
+selected_df <- reactive({
+    survey_df %>% 
+        filter(new_description == input$selected) %>%
+        filter(!is.na(answer)) %>%
+        mutate(answer = factor(answer, levels = unique(answer)))
+    })
+
+
+renderPlot({
+        p <- ggplot(selected_df(), 
+                    aes(x = answer, 
+                        y = proportion, 
+                        fill = gender)) +
+            geom_errorbar(aes(ymin = proportion - error, ymax = proportion + error), 
+                          position = position_dodge(0.9), color = "gray60", 
+                          size = 1.3, width = 0.3) +
+            geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+            theme_minimal(base_size = 18) +
+            scale_y_continuous(labels = scales::percent_format()) +
+            theme(legend.title=element_blank()) +
+            labs(x = NULL, y = NULL,
+                 title = input$selected) +
+            scale_fill_manual(values = c("#440154FF", "#21908CFF"),
+                              guide = guide_legend(reverse=TRUE)) +
+            coord_flip()
+
+        p
+})
+
+```
+
+### Statistical Comparison {data-height=200}
+
+```{r}
+p_value <- reactive({
+    p_values %>% 
+        filter(new_description == input$selected) %>%
+        select(adjusted.p.value) %>% 
+        as.numeric
+})
+
+renderText({
+    paste0("A chi-squared test evaluating how likely that the women's responses 
+    and men's responses were drawn from the same distribution (and any
+    differences arose only by chance) has a p-value of about ", round(p_value(), digits = 6),".
+    This indicates that men's and women's answers are ", 
+    ifelse(p_value() > 0.05, "not statistically different.", 
+           ifelse(p_value() < 1e-3, "very likely to be statistically different.",
+                  "possibly statistically different.")))
+    })
+
+```
